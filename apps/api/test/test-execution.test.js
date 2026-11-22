@@ -83,6 +83,11 @@ test("test execution runs, history, details, and authorization work end-to-end",
       "Project Without Eligible Cases",
     );
 
+    const missingScriptProjectId = await createProject(
+      userId,
+      "Project Missing Approved Script",
+    );
+
     const archivedProjectId = await createProject(
       userId,
       "Archived Execution Project",
@@ -145,6 +150,33 @@ test("test execution runs, history, details, and authorization work end-to-end",
       return result.rows[0].id;
     };
 
+    const createAutomationScript = async (
+      testCaseId,
+      version = 1,
+      approvalStatus = "APPROVED",
+    ) => {
+      const result = await pool.query(
+        `INSERT INTO automation_scripts
+           (test_case_id, name, framework, language, source_code, version, approval_status)
+         VALUES ($1, $2, 'PLAYWRIGHT', 'TYPESCRIPT', $3, $4, $5)
+         RETURNING id`,
+        [
+          testCaseId,
+          `Automation Script v${version}`,
+          `import { test, expect } from "@playwright/test";
+
+test("generated test", async ({ page }) => {
+  await page.goto("https://example.com");
+  await expect(page).toHaveTitle(/Example Domain/);
+});`,
+          version,
+          approvalStatus,
+        ],
+      );
+
+      return result.rows[0].id;
+    };
+
     // Current requirement version 2: version 1 test case must be excluded.
     const versionedRequirementId = await createRequirement(
       projectId,
@@ -168,6 +200,22 @@ test("test execution runs, history, details, and authorization work end-to-end",
     const eligibleTestCaseId = await createTestCase(
       currentRequirementId,
       "Current approved test case",
+      1,
+    );
+
+    const eligibleAutomationScriptId = await createAutomationScript(
+      eligibleTestCaseId,
+    );
+
+    const missingScriptRequirementId = await createRequirement(
+      missingScriptProjectId,
+      "Requirement Without Script",
+      1,
+    );
+
+    const missingScriptTestCaseId = await createTestCase(
+      missingScriptRequirementId,
+      "Approved test case without automation script",
       1,
     );
 
@@ -225,6 +273,30 @@ test("test execution runs, history, details, and authorization work end-to-end",
       "PROJECT_NOT_FOUND",
     );
 
+        // Reject run creation when an eligible test case has no approved script.
+    const missingScriptRun = await request(
+      `/api/projects/${missingScriptProjectId}/test-runs`,
+      { method: "POST" },
+    );
+
+    assert.equal(missingScriptRun.status, 409);
+    assert.equal(
+      missingScriptRun.body.error.code,
+      "NO_APPROVED_AUTOMATION_SCRIPTS",
+    );
+    assert.equal(
+      missingScriptRun.body.error.details.testCases.length,
+      1,
+    );
+    assert.equal(
+      missingScriptRun.body.error.details.testCases[0].testCaseId,
+      missingScriptTestCaseId,
+    );
+    assert.equal(
+      missingScriptRun.body.error.details.testCases[0].title,
+      "Approved test case without automation script",
+    );
+
     // 1. Create a run using only approved test cases from current versions.
     const created = await request(
       `/api/projects/${projectId}/test-runs`,
@@ -245,12 +317,28 @@ test("test execution runs, history, details, and authorization work end-to-end",
 
     const testRunId = created.body.data.testRun.id;
 
+    // Create a newer approved version after run creation.
+    // The existing run must retain its original script association.
+    const newerAutomationScriptId = await createAutomationScript(
+      eligibleTestCaseId,
+      2,
+    );
+
     // 2. Verify that the run has exactly the eligible test case.
     const storedResults = await pool.query(
-      `SELECT test_case_id, status
+      `SELECT test_case_id, automation_script_id, status
        FROM test_results
        WHERE test_run_id = $1`,
       [testRunId],
+    );
+
+    assert.equal(
+      storedResults.rows[0].automation_script_id,
+      eligibleAutomationScriptId,
+    );
+    assert.notEqual(
+      storedResults.rows[0].automation_script_id,
+      newerAutomationScriptId,
     );
 
     assert.equal(storedResults.rows.length, 1);
@@ -286,6 +374,11 @@ test("test execution runs, history, details, and authorization work end-to-end",
     assert.equal(details.body.data.results[0].requirementVersion, 1);
     assert.equal(details.body.data.results[0].isCurrent, true);
     assert.equal(details.body.data.results[0].status, "NOT_RUN");
+
+    assert.equal(
+      details.body.data.results[0].automationScriptId,
+      eligibleAutomationScriptId,
+    );
 
     // 9. Start the run and reject invalid lifecycle transitions.
     const started = await request(
@@ -339,6 +432,37 @@ test("test execution runs, history, details, and authorization work end-to-end",
 
     const resultId = resultLookup.rows[0].id;
 
+        // A result update must not accept a replacement automation script.
+    const attemptedScriptReassignment = await request(
+      `/api/test-runs/${testRunId}/results/${resultId}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          status: "PASSED",
+          automationScriptId: newerAutomationScriptId,
+        }),
+      },
+    );
+
+    assert.equal(attemptedScriptReassignment.status, 400);
+    assert.equal(
+      attemptedScriptReassignment.body.error.code,
+      "VALIDATION_ERROR",
+    );
+
+    const unchangedResult = await pool.query(
+      `SELECT automation_script_id, status
+       FROM test_results
+       WHERE id = $1`,
+      [resultId],
+    );
+
+    assert.equal(
+      unchangedResult.rows[0].automation_script_id,
+      eligibleAutomationScriptId,
+    );
+    assert.equal(unchangedResult.rows[0].status, "NOT_RUN");
+
     // 11. Record a successful test result.
     const recordedResult = await request(
       `/api/test-runs/${testRunId}/results/${resultId}`,
@@ -349,6 +473,11 @@ test("test execution runs, history, details, and authorization work end-to-end",
           durationMs: 1200,
         }),
       },
+    );
+
+    assert.equal(
+      recordedResult.body.data.result.automationScriptId,
+      eligibleAutomationScriptId,
     );
 
     // console.log("Recorded result response:",JSON.stringify(recordedResult.body, null, 2),);
