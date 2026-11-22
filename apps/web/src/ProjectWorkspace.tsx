@@ -8,6 +8,20 @@ type Project = { id: string; name: string; description: string | null; status: "
 type Requirement = { id: string; projectId: string; title: string; content: string; sourceFileName: string | null; status: string; createdAt: string; updatedAt: string };
 type TestCase = { id: string; requirementId: string; title: string; description: string | null; preconditions: string | null; steps: Array<{ action: string; expectedResult: string }>; expectedResult: string; priority: string; testType: string; status: "DRAFT" | "REVIEW" | "APPROVED" | "REJECTED" };
 type Analysis = { overallAssessment?: string; summary?: string; [key: string]: unknown };
+
+type AutomationScript = {
+  id: string;
+  test_case_id: string;
+  name: string;
+  framework: string;
+  language: string;
+  source_code: string;
+  version: number;
+  approval_status: "PENDING" | "APPROVED" | "REJECTED";
+  created_at: string;
+  updated_at: string;
+};
+
 type Data<T> = { data: T };
 type CoverageSummary = {
   totalRequirements: number;
@@ -67,13 +81,15 @@ type TestRunResult = {
 const field = "mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100";
 
 export default function ProjectWorkspace() {
+  const [testCases, setTestCases] = useState<TestCase[]>([]);
+  const [automationScripts, setAutomationScripts] = useState<Record<string, AutomationScript[]>>({});
+  const [expandedScriptId, setExpandedScriptId] = useState("");
   const { projectId = "" } = useParams();
   const { accessToken, user, logout } = useAuth();
   const navigate = useNavigate();
   const [project, setProject] = useState<Project | null>(null);
   const [requirements, setRequirements] = useState<Requirement[]>([]);
   const [selectedId, setSelectedId] = useState("");
-  const [testCases, setTestCases] = useState<TestCase[]>([]);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
@@ -231,6 +247,98 @@ export default function ProjectWorkspace() {
     } catch (err) { setError(err instanceof Error ? err.message : "Unable to update test case"); }
     finally { setBusy(""); }
   }
+
+
+  async function loadAutomationScripts(testCaseId: string) {
+    try {
+      const result = await apiRequest<
+        Data<{ scripts: AutomationScript[] }>
+      >(
+        `/api/test-cases/${testCaseId}/automation-scripts`,
+        {},
+        accessToken,
+      );
+
+      setAutomationScripts(current => ({
+        ...current,
+        [testCaseId]: result.data.scripts,
+      }));
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Unable to load automation scripts",
+      );
+    }
+  }
+
+  async function generateAutomationScript(testCase: TestCase) {
+    setBusy(`script-${testCase.id}`);
+    setError("");
+    setNotice("");
+
+    try {
+      await apiRequest(
+        `/api/test-cases/${testCase.id}/automation-scripts/generate`,
+        { method: "POST" },
+        accessToken,
+      );
+
+      await loadAutomationScripts(testCase.id);
+      setNotice("Automation script generated. Review it before approval.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Script generation failed");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function reviewAutomationScript(
+    script: AutomationScript,
+    approvalStatus: "APPROVED" | "REJECTED",
+  ) {
+    setBusy(`review-script-${script.id}`);
+    setError("");
+    setNotice("");
+
+    try {
+      const result = await apiRequest<
+        Data<{ script: AutomationScript }>
+      >(
+        `/api/automation-scripts/${script.id}/review`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ approvalStatus }),
+        },
+        accessToken,
+      );
+
+      setAutomationScripts(current => ({
+        ...current,
+        [script.test_case_id]: (current[script.test_case_id] ?? []).map(item =>
+          item.id === script.id ? result.data.script : item,
+        ),
+      }));
+
+      setNotice(`Automation script ${approvalStatus.toLowerCase()}.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to review script");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function toggleScriptDetails(testCaseId: string) {
+    if (expandedScriptId === testCaseId) {
+      setExpandedScriptId("");
+      return;
+    }
+
+    setExpandedScriptId(testCaseId);
+
+    if (!automationScripts[testCaseId]) {
+      await loadAutomationScripts(testCaseId);
+    }
+  }
+
 
   const approvedCount = testCases.filter(item => item.status === "APPROVED").length;
   const visibleTestCases = testCases.filter(item => {
@@ -634,7 +742,221 @@ export default function ProjectWorkspace() {
               <select value={casePriority} onChange={e=>setCasePriority(e.target.value)} className="rounded-lg border border-slate-300 px-3 py-2 text-xs"><option value="ALL">All priorities</option><option value="CRITICAL">Critical</option><option value="HIGH">High</option><option value="MEDIUM">Medium</option><option value="LOW">Low</option></select>
               <button onClick={exportTestCases} disabled={!testCases.length} className="flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 disabled:opacity-50"><Download size={14}/>Export CSV</button>
             </div>
-            <div className="mt-4 space-y-3">{visibleTestCases.map((item,index)=><article key={item.id} className="rounded-lg border border-slate-200 p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-[10px] font-semibold text-slate-400">TC-{String(index+1).padStart(3,"0")} · {item.testType} · {item.priority}</p><h4 className="mt-1 text-sm font-semibold">{item.title}</h4><p className="mt-1 text-xs leading-5 text-slate-500">{item.description}</p></div><span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold">{item.status}</span></div><p className="mt-3 text-xs font-semibold text-slate-600">Preconditions</p><p className="mt-1 text-xs text-slate-500">{item.preconditions || "None specified"}</p><ol className="mt-3 list-decimal space-y-1 pl-5 text-xs text-slate-600">{item.steps?.map((step,stepIndex)=><li key={stepIndex}>{typeof step === "string" ? step : `${step.action} — ${step.expectedResult}`}</li>)}</ol><p className="mt-3 text-xs font-semibold text-slate-600">Expected result</p><p className="mt-1 text-xs text-slate-500">{item.expectedResult}</p><div className="mt-4 flex flex-wrap gap-2">{item.status !== "APPROVED" && <button disabled={!!busy} onClick={()=>void reviewCase(item,"APPROVED")} className="flex items-center gap-1 rounded-md bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 disabled:opacity-50"><CheckCircle2 size={13}/>Approve</button>}{item.status !== "REVIEW" && item.status !== "APPROVED" && <button disabled={!!busy} onClick={()=>void reviewCase(item,"REVIEW")} className="rounded-md bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 disabled:opacity-50">Mark for review</button>}{item.status !== "REJECTED" && <button disabled={!!busy} onClick={()=>void reviewCase(item,"REJECTED")} className="rounded-md bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 disabled:opacity-50">Reject</button>}</div></article>)}{testCases.length>0 && visibleTestCases.length===0 && <p className="rounded-lg bg-slate-50 p-5 text-center text-sm text-slate-500">No test cases match the selected filters.</p>}{testCases.length===0 && <div className="rounded-lg bg-slate-50 p-8 text-center"><LoaderCircle className="mx-auto text-slate-300" size={22}/><p className="mt-2 text-sm text-slate-500">No test cases yet. Complete an analysis, then generate test cases.</p></div>}</div>
+            <div className="mt-4 space-y-3">
+              {visibleTestCases.map((item, index) => (
+                <article
+                  key={item.id}
+                  className="rounded-lg border border-slate-200 p-4"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="text-[10px] font-semibold text-slate-400">
+                        TC-{String(index + 1).padStart(3, "0")} · {item.testType} · {item.priority}
+                      </p>
+                      <h4 className="mt-1 text-sm font-semibold">{item.title}</h4>
+                      <p className="mt-1 text-xs leading-5 text-slate-500">
+                        {item.description}
+                      </p>
+                    </div>
+
+                    <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold">
+                      {item.status}
+                    </span>
+                  </div>
+
+                  <p className="mt-3 text-xs font-semibold text-slate-600">
+                    Preconditions
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {item.preconditions || "None specified"}
+                  </p>
+
+                  <ol className="mt-3 list-decimal space-y-1 pl-5 text-xs text-slate-600">
+                    {item.steps?.map((step, stepIndex) => (
+                      <li key={stepIndex}>
+                        {typeof step === "string"
+                          ? step
+                          : `${step.action} — ${step.expectedResult}`}
+                      </li>
+                    ))}
+                  </ol>
+
+                  <p className="mt-3 text-xs font-semibold text-slate-600">
+                    Expected result
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {item.expectedResult}
+                  </p>
+
+                  {/* Test case review actions */}
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {item.status !== "APPROVED" && (
+                      <button
+                        disabled={!!busy}
+                        onClick={() => void reviewCase(item, "APPROVED")}
+                        className="flex items-center gap-1 rounded-md bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 disabled:opacity-50"
+                      >
+                        <CheckCircle2 size={13} />
+                        Approve
+                      </button>
+                    )}
+
+                    {item.status !== "REVIEW" && item.status !== "APPROVED" && (
+                      <button
+                        disabled={!!busy}
+                        onClick={() => void reviewCase(item, "REVIEW")}
+                        className="rounded-md bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 disabled:opacity-50"
+                      >
+                        Mark for review
+                      </button>
+                    )}
+
+                    {item.status !== "REJECTED" && (
+                      <button
+                        disabled={!!busy}
+                        onClick={() => void reviewCase(item, "REJECTED")}
+                        className="rounded-md bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 disabled:opacity-50"
+                      >
+                        Reject
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Automation scripts */}
+                  <div className="mt-4 border-t border-slate-100 pt-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <h5 className="text-xs font-semibold text-slate-800">
+                          Automation Scripts
+                        </h5>
+                        <p className="mt-1 text-[10px] text-slate-500">
+                          Playwright · TypeScript
+                        </p>
+                      </div>
+
+                      <div className="flex flex-wrap gap-2">
+                        {item.status === "APPROVED" && (
+                          <button
+                            disabled={!!busy}
+                            onClick={() => void generateAutomationScript(item)}
+                            className="rounded-md bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 disabled:opacity-50"
+                          >
+                            {busy === `script-${item.id}`
+                              ? "Generating…"
+                              : "Generate script"}
+                          </button>
+                        )}
+
+                        <button
+                          disabled={!!busy}
+                          onClick={() => void toggleScriptDetails(item.id)}
+                          className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
+                        >
+                          {expandedScriptId === item.id ? "Hide scripts" : "View scripts"}
+                          {automationScripts[item.id]
+                            ? ` (${automationScripts[item.id].length})`
+                            : ""}
+                        </button>
+                      </div>
+                    </div>
+
+                    {expandedScriptId === item.id && (
+                      <div className="mt-3 space-y-3">
+                        {!automationScripts[item.id]?.length ? (
+                          <p className="rounded-lg bg-slate-50 p-4 text-center text-xs text-slate-500">
+                            No automation scripts generated yet.
+                            {item.status === "APPROVED"
+                              ? " Generate a script to get started."
+                              : " Approve this test case before generating a script."}
+                          </p>
+                        ) : (
+                          automationScripts[item.id].map(script => (
+                            <article
+                              key={script.id}
+                              className="rounded-lg border border-slate-200 p-3"
+                            >
+                              <div className="flex flex-wrap items-start justify-between gap-2">
+                                <div>
+                                  <p className="text-xs font-semibold text-slate-800">
+                                    {script.name}
+                                  </p>
+                                  <p className="mt-1 text-[10px] text-slate-500">
+                                    Version {script.version} · {script.framework} · {script.language}
+                                  </p>
+                                  <p className="mt-1 text-[10px] text-slate-400">
+                                    Created: {new Date(script.created_at).toLocaleString()}
+                                  </p>
+                                </div>
+
+                                <span
+                                  className={`rounded-full px-2 py-1 text-[10px] font-semibold ${
+                                    script.approval_status === "APPROVED"
+                                      ? "bg-emerald-50 text-emerald-700"
+                                      : script.approval_status === "REJECTED"
+                                        ? "bg-red-50 text-red-700"
+                                        : "bg-amber-50 text-amber-700"
+                                  }`}
+                                >
+                                  {script.approval_status}
+                                </span>
+                              </div>
+
+                              <details className="mt-3">
+                                <summary className="cursor-pointer text-xs font-semibold text-blue-700">
+                                  View TypeScript source
+                                </summary>
+                                <pre className="mt-2 max-h-96 overflow-auto rounded-lg bg-slate-950 p-3 text-[11px] leading-5 text-slate-100">
+                                  <code>{script.source_code}</code>
+                                </pre>
+                              </details>
+
+                              {script.approval_status === "PENDING" && (
+                                <div className="mt-3 flex flex-wrap gap-2">
+                                  <button
+                                    disabled={!!busy}
+                                    onClick={() =>
+                                      void reviewAutomationScript(script, "APPROVED")
+                                    }
+                                    className="rounded-md bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 disabled:opacity-50"
+                                  >
+                                    Approve script
+                                  </button>
+
+                                  <button
+                                    disabled={!!busy}
+                                    onClick={() =>
+                                      void reviewAutomationScript(script, "REJECTED")
+                                    }
+                                    className="rounded-md bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 disabled:opacity-50"
+                                  >
+                                    Reject script
+                                  </button>
+                                </div>
+                              )}
+                            </article>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </article>
+              ))}
+
+              {testCases.length > 0 && visibleTestCases.length === 0 && (
+                <p className="rounded-lg bg-slate-50 p-5 text-center text-sm text-slate-500">
+                  No test cases match the selected filters.
+                </p>
+              )}
+
+              {testCases.length === 0 && (
+                <div className="rounded-lg bg-slate-50 p-8 text-center">
+                  <LoaderCircle className="mx-auto text-slate-300" size={22} />
+                  <p className="mt-2 text-sm text-slate-500">
+                    No test cases yet. Complete an analysis, then generate test cases.
+                  </p>
+                </div>
+              )}
+            </div>
           </section>
         </>}
       </section>

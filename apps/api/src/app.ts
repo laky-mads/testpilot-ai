@@ -12,6 +12,7 @@ import { requirementsRouter } from "./routes/requirements.routes.js";
 import { documentUploadRouter } from "./routes/document-upload.routes.js";
 import { requirementAnalysisRouter } from "./routes/requirement-analysis.routes.js";
 import { testCaseGenerationRouter } from "./routes/test-case-generation.routes.js";
+import { automationScriptsRouter } from "./routes/automation-scripts.routes.js";
 
 export const app = express();
 
@@ -28,6 +29,7 @@ app.use("/api", requirementsRouter);
 app.use("/api", documentUploadRouter);
 app.use("/api", requirementAnalysisRouter);
 app.use("/api", testCaseGenerationRouter);
+app.use("/api", automationScriptsRouter);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

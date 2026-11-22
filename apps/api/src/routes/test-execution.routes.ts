@@ -21,8 +21,7 @@ const resultUpdateSchema = z
     status: z.enum(["PASSED", "FAILED", "SKIPPED", "ERROR"]),
     durationMs: z.number().int().min(0).optional(),
     errorMessage: z.string().max(10000).nullable().optional(),
-    artifactPath: z.string().max(2000).nullable().optional(),
-    automationScriptId: z.uuid().nullable().optional(),
+    artifactPath: z.string().max(2000).nullable().optional()
   })
   .strict();
 
@@ -420,8 +419,23 @@ testExecutionRouter.post(
         });
       }
 
-      const eligibleCases = await client.query<{ id: string }>(
-        `SELECT tc.id
+      const eligibleCases = await client.query<{
+        id: string;
+        title: string;
+        automation_script_id: string | null;
+      }>(
+        `SELECT
+           tc.id,
+           tc.title,
+           (
+             SELECT script.id
+             FROM automation_scripts script
+             WHERE script.test_case_id = tc.id
+               AND script.approval_status = 'APPROVED'
+             ORDER BY script.version DESC
+             LIMIT 1
+             FOR SHARE
+           ) AS automation_script_id
          FROM test_cases tc
          INNER JOIN requirements r ON r.id = tc.requirement_id
          WHERE r.project_id = $1
@@ -447,6 +461,29 @@ testExecutionRouter.post(
         });
       }
 
+      const casesWithoutScripts = eligibleCases.rows
+        .filter((row) => !row.automation_script_id)
+        .map((row) => ({
+          testCaseId: row.id,
+          title: row.title,
+        }));
+
+      if (casesWithoutScripts.length > 0) {
+        await rollbackSafely(client, transactionOpen);
+        transactionOpen = false;
+
+        return response.status(409).json({
+          error: {
+            code: "NO_APPROVED_AUTOMATION_SCRIPTS",
+            message:
+              "Every eligible test case must have an approved automation script before execution",
+            details: {
+              testCases: casesWithoutScripts,
+            },
+          },
+        });
+      }
+
       const runResult = await client.query<TestRunRow>(
         `INSERT INTO test_runs (project_id, triggered_by, status)
          VALUES ($1, $2, 'QUEUED')
@@ -457,11 +494,17 @@ testExecutionRouter.post(
 
       const run = runResult.rows[0];
 
-      await client.query(
-        `INSERT INTO test_results (test_run_id, test_case_id, status)
-         SELECT $1, selected.id, 'NOT_RUN'
-         FROM unnest($2::uuid[]) AS selected(id)`,
-        [run.id, testCaseIds],
+        await client.query(
+        `INSERT INTO test_results
+           (test_run_id, test_case_id, automation_script_id, status)
+         SELECT $1, selected.test_case_id, selected.automation_script_id, 'NOT_RUN'
+         FROM unnest($2::uuid[], $3::uuid[])
+           AS selected(test_case_id, automation_script_id)`,
+        [
+          run.id,
+          eligibleCases.rows.map((row) => row.id),
+          eligibleCases.rows.map((row) => row.automation_script_id),
+        ],
       );
 
       await client.query("COMMIT");
@@ -658,20 +701,10 @@ testExecutionRouter.patch(
              duration_ms = $4,
              error_message = $5,
              artifact_path = $6,
-             automation_script_id = $7,
              executed_at = NOW()
          WHERE res.id = $1
            AND res.test_run_id = $2
            AND res.status = 'NOT_RUN'
-           AND (
-             $7::uuid IS NULL
-             OR EXISTS (
-               SELECT 1
-               FROM automation_scripts script
-               WHERE script.id = $7
-                 AND script.test_case_id = res.test_case_id
-             )
-           )
          RETURNING res.id, res.test_case_id, res.status,
                    res.duration_ms, res.error_message,
                    res.artifact_path, res.automation_script_id,
@@ -683,7 +716,6 @@ testExecutionRouter.patch(
           input.durationMs ?? null,
           input.errorMessage ?? null,
           input.artifactPath ?? null,
-          input.automationScriptId ?? null,
         ],
       );
 
@@ -718,9 +750,8 @@ testExecutionRouter.patch(
 
         return response.status(400).json({
           error: {
-            code: "INVALID_AUTOMATION_SCRIPT",
-            message:
-              "The automation script does not belong to this test case",
+            code: "RESULT_ALREADY_RECORDED",
+            message: "This test result could not be updated",
           },
         });
       }
