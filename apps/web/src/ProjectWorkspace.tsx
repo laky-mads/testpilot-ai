@@ -258,6 +258,83 @@ export default function ProjectWorkspace() {
     anchor.remove();
     URL.revokeObjectURL(url);
   }
+
+  function exportExecutionRun(run: TestRun) {
+    const results = runResults[run.id];
+
+    if (!results?.length) return;
+
+    const columns = [
+      "Run ID",
+      "Run Status",
+      "Run Created At",
+      "Run Started At",
+      "Run Completed At",
+      "Test Case ID",
+      "Test Case Title",
+      "Requirement ID",
+      "Requirement Version",
+      "Requirement Version Status",
+      "Result Status",
+      "Duration (ms)",
+      "Error Message",
+      "Artifact Path",
+      "Executed At",
+    ];
+
+    const escapeCsv = (value: unknown) => {
+      const text = String(value ?? "");
+
+      const safeText = /^[\t\r ]*[=+\-@]/.test(text)
+        ? `'${text}`
+        : text;
+
+      return `"${safeText.replace(/"/g, '""')}"`;
+    };
+
+    const rows = results.map(result => [
+      run.id,
+      run.status,
+      run.createdAt,
+      run.startedAt,
+      run.completedAt,
+      result.testCaseId,
+      result.testCaseTitle,
+      result.requirementId,
+      result.requirementVersion,
+      result.isCurrent ? "CURRENT" : "OUTDATED",
+      result.status,
+      result.durationMs,
+      result.errorMessage,
+      result.artifactPath,
+      result.executedAt,
+    ]);
+
+    const csv = [columns, ...rows]
+      .map(row => row.map(escapeCsv).join(","))
+      .join("\r\n");
+
+    const blob = new Blob(["\uFEFF", csv], {
+      type: "text/csv;charset=utf-8;",
+    });
+
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+
+    const projectSlug =
+      project?.name?.trim().replace(/[^a-z0-9]+/gi, "-").toLowerCase() ||
+      "project";
+
+    anchor.href = url;
+    anchor.download = `testpilot-${projectSlug}-run-${run.id.slice(0, 8)}.csv`;
+
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+
+    URL.revokeObjectURL(url);
+  }
+
   return <div className="min-h-screen bg-slate-50 text-slate-900">
     <header className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white px-5 py-4 md:px-8">
       <div className="flex items-center gap-3"><Link to="/" className="rounded-lg p-2 text-slate-500 hover:bg-slate-100" aria-label="Back to projects"><ArrowLeft size={18}/></Link><div><p className="text-xs text-slate-400">TestPilot AI / Project workspace</p><h1 className="font-semibold">{project?.name ?? "Loading project…"}</h1></div></div>
@@ -480,6 +557,18 @@ export default function ProjectWorkspace() {
 
                   {expandedRunId === run.id && (
                     <div className="border-t border-slate-200 p-4">
+                      {runResults[run.id]?.length > 0 && (
+                        <div className="mb-3 flex justify-end">
+                          <button
+                            type="button"
+                            onClick={() => exportExecutionRun(run)}
+                            className="flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                          >
+                            <Download size={14} />
+                            Export Run CSV
+                          </button>
+                        </div>
+                      )}
                       {!runResults[run.id] ? (
                         <p className="text-xs text-slate-500">Loading test results…</p>
                       ) : runResults[run.id].length === 0 ? (
