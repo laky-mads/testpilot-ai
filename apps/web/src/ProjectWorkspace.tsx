@@ -9,6 +9,61 @@ type Requirement = { id: string; projectId: string; title: string; content: stri
 type TestCase = { id: string; requirementId: string; title: string; description: string | null; preconditions: string | null; steps: Array<{ action: string; expectedResult: string }>; expectedResult: string; priority: string; testType: string; status: "DRAFT" | "REVIEW" | "APPROVED" | "REJECTED" };
 type Analysis = { overallAssessment?: string; summary?: string; [key: string]: unknown };
 type Data<T> = { data: T };
+type CoverageSummary = {
+  totalRequirements: number;
+  coveredRequirements: number;
+  uncoveredRequirements: number;
+  coveragePercentage: number;
+  currentApprovedTestCases: number;
+  outdatedApprovedTestCases: number;
+};
+
+type RequirementCoverage = {
+  requirementId: string;
+  title: string;
+  status: string;
+  currentVersion: number;
+  totalTestCases: number;
+  currentVersionTestCases: number;
+  currentApprovedTestCases: number;
+  outdatedApprovedTestCases: number;
+  coverageStatus: "COVERED" | "UNCOVERED";
+};
+
+type ExecutionSummary = {
+  total: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  errors: number;
+  notRun: number;
+};
+
+type TestRun = {
+  id: string;
+  projectId: string;
+  triggeredBy: string | null;
+  status: "QUEUED" | "RUNNING" | "PASSED" | "FAILED" | "CANCELLED";
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  summary: ExecutionSummary;
+};
+
+type TestRunResult = {
+  id: string;
+  testCaseId: string;
+  testCaseTitle: string;
+  requirementId: string;
+  requirementVersion: number;
+  isCurrent: boolean;
+  automationScriptId: string | null;
+  status: string;
+  durationMs: number | null;
+  errorMessage: string | null;
+  artifactPath: string | null;
+  executedAt: string | null;
+};
 const field = "mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100";
 
 export default function ProjectWorkspace() {
@@ -29,6 +84,13 @@ export default function ProjectWorkspace() {
   const [caseSearch, setCaseSearch] = useState("");
   const [caseStatus, setCaseStatus] = useState("ALL");
   const [casePriority, setCasePriority] = useState("ALL");
+  const [coverage, setCoverage] = useState<CoverageSummary | null>(null);
+  const [coverageDetails, setCoverageDetails] = useState<RequirementCoverage[]>([]);
+  const [testRuns, setTestRuns] = useState<TestRun[]>([]);
+  const [expandedRunId, setExpandedRunId] = useState("");
+  const [runResults, setRunResults] = useState<Record<string, TestRunResult[]>>({});
+  const [reportBusy, setReportBusy] = useState(false);
+  const [reportError, setReportError] = useState("");
 
   const selected = useMemo(() => requirements.find(item => item.id === selectedId) ?? null, [requirements, selectedId]);
 
@@ -52,7 +114,73 @@ export default function ProjectWorkspace() {
     setAnalysis(analysisResult?.data.analysis ?? null);
   }
 
+  async function loadReports() {
+    setReportBusy(true);
+    setReportError("");
+
+    try {
+      const [coverageResult, detailsResult, runsResult] = await Promise.all([
+        apiRequest<Data<{ coverage: CoverageSummary }>>(
+          `/api/projects/${projectId}/coverage`,
+          {},
+          accessToken,
+        ),
+        apiRequest<Data<{ requirements: RequirementCoverage[] }>>(
+          `/api/projects/${projectId}/coverage/details`,
+          {},
+          accessToken,
+        ),
+        apiRequest<Data<{ testRuns: TestRun[]; pagination: { limit: number; offset: number; count: number } }>>(
+          `/api/projects/${projectId}/test-runs?limit=20&offset=0`,
+          {},
+          accessToken,
+        ),
+      ]);
+
+      setCoverage(coverageResult.data.coverage);
+      setCoverageDetails(detailsResult.data.requirements);
+      setTestRuns(runsResult.data.testRuns);
+    } catch (err) {
+      setReportError(
+        err instanceof Error ? err.message : "Unable to load project reports",
+      );
+    } finally {
+      setReportBusy(false);
+    }
+  }
+
+  async function toggleRunDetails(testRunId: string) {
+    if (expandedRunId === testRunId) {
+      setExpandedRunId("");
+      return;
+    }
+
+    setExpandedRunId(testRunId);
+
+    if (runResults[testRunId]) {
+      return;
+    }
+
+    try {
+      const result = await apiRequest<
+        Data<{ testRun: TestRun; results: TestRunResult[] }>
+      >(`/api/test-runs/${testRunId}`, {}, accessToken);
+
+      setRunResults(current => ({
+        ...current,
+        [testRunId]: result.data.results,
+      }));
+    } catch (err) {
+      setReportError(
+        err instanceof Error ? err.message : "Unable to load execution details",
+      );
+    }
+  }
+
   useEffect(() => { void loadProject().catch(err => setError(err instanceof Error ? err.message : "Unable to load project")); }, [projectId, accessToken]);
+  useEffect(() => {
+    void loadReports();
+  }, [projectId, accessToken]);
   useEffect(() => { if (selectedId) void loadArtifacts(selectedId).catch(err => setError(err instanceof Error ? err.message : "Unable to load requirement artifacts")); else { setTestCases([]); setAnalysis(null); } }, [selectedId, accessToken]);
 
   async function createRequirement(event: FormEvent) {
@@ -148,6 +276,264 @@ export default function ProjectWorkspace() {
         </form>
       </aside>
       <section className="space-y-5">
+        {reportError && (
+          <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700">
+            {reportError}
+          </p>
+        )}
+
+        <section className="rounded-xl border border-slate-200 bg-white p-5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="font-semibold">Requirement Coverage</h2>
+              <p className="mt-1 text-xs text-slate-500">
+                Coverage based on approved test cases for current requirement versions.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void loadReports()}
+              disabled={reportBusy}
+              className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 disabled:opacity-50"
+            >
+              {reportBusy ? "Refreshing…" : "Refresh reports"}
+            </button>
+          </div>
+
+          {reportBusy && !coverage ? (
+            <p className="mt-5 text-sm text-slate-500">Loading coverage data…</p>
+          ) : coverage ? (
+            <>
+              <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded-lg bg-blue-50 p-4">
+                  <p className="text-xs text-blue-700">Coverage</p>
+                  <p className="mt-1 text-2xl font-semibold text-blue-900">
+                    {coverage.coveragePercentage.toFixed(2)}%
+                  </p>
+                </div>
+                <div className="rounded-lg bg-emerald-50 p-4">
+                  <p className="text-xs text-emerald-700">Covered requirements</p>
+                  <p className="mt-1 text-2xl font-semibold text-emerald-900">
+                    {coverage.coveredRequirements}
+                  </p>
+                </div>
+                <div className="rounded-lg bg-amber-50 p-4">
+                  <p className="text-xs text-amber-700">Uncovered requirements</p>
+                  <p className="mt-1 text-2xl font-semibold text-amber-900">
+                    {coverage.uncoveredRequirements}
+                  </p>
+                </div>
+                <div className="rounded-lg bg-slate-100 p-4">
+                  <p className="text-xs text-slate-600">Approved test cases</p>
+                  <p className="mt-1 text-2xl font-semibold text-slate-900">
+                    {coverage.currentApprovedTestCases}
+                  </p>
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    {coverage.outdatedApprovedTestCases} outdated
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-5">
+                <div className="mb-2 flex justify-between text-xs">
+                  <span className="font-medium text-slate-600">Overall coverage</span>
+                  <span className="font-semibold text-slate-800">
+                    {coverage.coveredRequirements} / {coverage.totalRequirements}
+                  </span>
+                </div>
+                <div
+                  className="h-2.5 overflow-hidden rounded-full bg-slate-100"
+                  role="progressbar"
+                  aria-label="Requirement coverage"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={coverage.coveragePercentage}
+                >
+                  <div
+                    className="h-full rounded-full bg-blue-600 transition-all"
+                    style={{
+                      width: `${Math.min(100, Math.max(0, coverage.coveragePercentage))}%`,
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div className="mt-6">
+                <h3 className="text-sm font-semibold">Requirement breakdown</h3>
+                {coverageDetails.length === 0 ? (
+                  <p className="mt-3 rounded-lg bg-slate-50 p-4 text-sm text-slate-500">
+                    No active requirements available for coverage analysis.
+                  </p>
+                ) : (
+                  <div className="mt-3 divide-y divide-slate-100">
+                    {coverageDetails.map(item => (
+                      <div
+                        key={item.requirementId}
+                        className="flex flex-wrap items-center justify-between gap-3 py-3"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium text-slate-800">
+                            {item.title}
+                          </p>
+                          <p className="mt-1 text-xs text-slate-500">
+                            Version {item.currentVersion} · {item.currentApprovedTestCases} approved current-version cases
+                            {item.outdatedApprovedTestCases > 0
+                              ? ` · ${item.outdatedApprovedTestCases} outdated`
+                              : ""}
+                          </p>
+                        </div>
+                        <span
+                          className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${
+                            item.coverageStatus === "COVERED"
+                              ? "bg-emerald-50 text-emerald-700"
+                              : "bg-amber-50 text-amber-700"
+                          }`}
+                        >
+                          {item.coverageStatus}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          ) : (
+            <p className="mt-4 text-sm text-slate-500">
+              Coverage information is not available yet.
+            </p>
+          )}
+        </section>
+        <section className="rounded-xl border border-slate-200 bg-white p-5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="font-semibold">Execution History</h2>
+              <p className="mt-1 text-xs text-slate-500">
+                Review previous test runs and their individual results.
+              </p>
+            </div>
+            <span className="text-xs text-slate-500">
+              {testRuns.length} recent runs
+            </span>
+          </div>
+
+          {testRuns.length === 0 ? (
+            <div className="mt-4 rounded-lg bg-slate-50 p-6 text-center">
+              <p className="text-sm font-medium text-slate-700">No execution history yet</p>
+              <p className="mt-1 text-xs text-slate-500">
+                Execution runs will appear here when test runs are created.
+              </p>
+            </div>
+          ) : (
+            <div className="mt-4 space-y-3">
+              {testRuns.map(run => (
+                <article key={run.id} className="rounded-lg border border-slate-200">
+                  <button
+                    type="button"
+                    onClick={() => void toggleRunDetails(run.id)}
+                    aria-expanded={expandedRunId === run.id}
+                    className="w-full p-4 text-left hover:bg-slate-50"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-slate-800">
+                          Run {run.id.slice(0, 8)}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-500">
+                          Created {new Date(run.createdAt).toLocaleString()}
+                        </p>
+                      </div>
+                      <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${
+                        run.status === "PASSED"
+                          ? "bg-emerald-50 text-emerald-700"
+                          : run.status === "FAILED"
+                            ? "bg-red-50 text-red-700"
+                            : run.status === "RUNNING"
+                              ? "bg-blue-50 text-blue-700"
+                              : run.status === "CANCELLED"
+                                ? "bg-slate-100 text-slate-600"
+                                : "bg-amber-50 text-amber-700"
+                      }`}>
+                        {run.status}
+                      </span>
+                    </div>
+
+                    <div className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-6">
+                      {[
+                        ["Total", run.summary.total],
+                        ["Passed", run.summary.passed],
+                        ["Failed", run.summary.failed],
+                        ["Skipped", run.summary.skipped],
+                        ["Errors", run.summary.errors],
+                        ["Not run", run.summary.notRun],
+                      ].map(([label, value]) => (
+                        <div key={label} className="rounded-md bg-slate-50 p-2">
+                          <p className="text-[10px] text-slate-500">{label}</p>
+                          <p className="mt-1 text-sm font-semibold text-slate-800">{value}</p>
+                        </div>
+                      ))}
+                    </div>
+
+                    <p className="mt-3 text-xs font-medium text-blue-700">
+                      {expandedRunId === run.id ? "Hide details ↑" : "View test results ↓"}
+                    </p>
+                  </button>
+
+                  {expandedRunId === run.id && (
+                    <div className="border-t border-slate-200 p-4">
+                      {!runResults[run.id] ? (
+                        <p className="text-xs text-slate-500">Loading test results…</p>
+                      ) : runResults[run.id].length === 0 ? (
+                        <p className="text-xs text-slate-500">No test results found for this run.</p>
+                      ) : (
+                        <div className="space-y-2">
+                          {runResults[run.id].map(result => (
+                            <div key={result.id} className="rounded-lg bg-slate-50 p-3">
+                              <div className="flex flex-wrap items-start justify-between gap-2">
+                                <div className="min-w-0">
+                                  <p className="text-xs font-semibold text-slate-800">
+                                    {result.testCaseTitle}
+                                  </p>
+                                  <p className="mt-1 text-[10px] text-slate-500">
+                                    Requirement version {result.requirementVersion}
+                                    {result.isCurrent ? " · Current" : " · Outdated"}
+                                  </p>
+                                </div>
+                                <span className="text-[10px] font-semibold text-slate-600">
+                                  {result.status}
+                                </span>
+                              </div>
+
+                              <div className="mt-2 flex flex-wrap gap-3 text-[10px] text-slate-500">
+                                {result.durationMs !== null && (
+                                  <span>Duration: {result.durationMs} ms</span>
+                                )}
+                                {result.executedAt && (
+                                  <span>Executed: {new Date(result.executedAt).toLocaleString()}</span>
+                                )}
+                              </div>
+
+                              {result.errorMessage && (
+                                <p className="mt-2 whitespace-pre-wrap rounded-md bg-red-50 p-2 text-xs text-red-700">
+                                  {result.errorMessage}
+                                </p>
+                              )}
+
+                              {result.artifactPath && (
+                                <p className="mt-2 break-all text-[10px] text-slate-500">
+                                  Artifact: {result.artifactPath}
+                                </p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
         {error && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p>}{notice && <p role="status" className="rounded-lg bg-emerald-50 p-3 text-sm text-emerald-700">{notice}</p>}
         {!selected ? <div className="rounded-xl border border-dashed border-slate-300 bg-white p-12 text-center"><FileText className="mx-auto text-slate-300" size={30}/><h2 className="mt-3 font-semibold">Select a requirement</h2><p className="mt-1 text-sm text-slate-500">Your AI analysis and generated test cases will appear here.</p></div> : <>
           <section className="rounded-xl border border-slate-200 bg-white p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-semibold tracking-wide text-blue-700">REQUIREMENT</p><h2 className="mt-1 text-lg font-semibold">{selected.title}</h2><p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-600">{selected.content}</p></div><span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold">{selected.status}</span></div><div className="mt-5 flex flex-wrap gap-2"><button disabled={!!busy || selected.status === "APPROVED" || selected.status === "ARCHIVED"} onClick={() => void runAnalysis()} className="flex items-center gap-2 rounded-lg bg-indigo-700 px-4 py-2.5 text-xs font-semibold text-white disabled:opacity-50"><Bot size={15}/>{busy === "analyze" ? "Analyzing…" : "Analyze with AI"}</button><button disabled={!!busy || !analysis} onClick={() => void generateCases()} className="flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2.5 text-xs font-semibold text-blue-800 disabled:opacity-50"><WandSparkles size={15}/>{busy === "generate" ? "Generating…" : "Generate test cases"}</button></div></section>

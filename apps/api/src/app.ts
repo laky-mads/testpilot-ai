@@ -1,6 +1,7 @@
 import cors from "cors";
 import express from "express";
 import { env } from "./config/env.js";
+import { testExecutionRouter } from "./routes/test-execution.routes.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { notFoundHandler } from "./middleware/not-found.js";
 import { requestIdMiddleware } from "./middleware/request-id.js";
@@ -18,6 +19,7 @@ app.disable("x-powered-by");
 app.use(requestIdMiddleware);
 app.use(cors({ origin: env.webOrigin }));
 app.use(express.json({ limit: "1mb" }));
+app.use("/api", testExecutionRouter);
 
 app.use("/api/health", healthRouter);
 app.use("/api/auth", authRouter);
